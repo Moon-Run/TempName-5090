@@ -10,6 +10,8 @@ bash tools/5090/run_init.sh --trials 1 --blocks 1 --execute
 
 配置脚本会检查现有软件、准备固定版本的 CUTLASS，并做一次不启动 GPU 的 SM120 小编译检查。它不创建 venv，不执行 pip/apt，不安装或升级 Python、PyTorch、CUDA，也不依赖 Megatron、Apex 或 H100 配置脚本。最后一条命令才启动四组实验，先做算子检查，再测 GPT 6.7B / TP8 完整训练步。
 
+实验入口默认后台运行，结果写入仓库同级 `Data-5090/SL3061/`。使用 `--place 60` 切换到 `SL3060`，使用 `--foreground` 在当前终端等待。配置脚本自身及其可选 `--gpu-check` 仍在前台执行，以确认检查完成后再发布环境配置。
+
 ## CUTLASS 如何保存和恢复
 
 Git 保留 [`third_party/cutlass.lock.json`](../third_party/cutlass.lock.json)，其中固定 CUTLASS 3.9.0 提交 `df8a550d3917b0e97f416b2ed8c2d786f7f686a3` 和 835 个文件的 SHA256。实际的 `third_party/cutlass/` 由 `.gitignore` 忽略，在目标服务器配置时恢复。

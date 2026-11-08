@@ -279,7 +279,7 @@ def verify_gpu(args, toolkit, runner):
     env.pop('CUDA_VISIBLE_DEVICES')
     if 'CUDA_VISIBLE_DEVICES' in os.environ:
         env['CUDA_VISIBLE_DEVICES'] = os.environ['CUDA_VISIBLE_DEVICES']
-    runner.run([args.base_python, REPO / 'tools/5090/init.py', '--execute', '--preflight-only',
+    runner.run([args.base_python, REPO / 'tools/5090/init.py', '--execute', '--foreground', '--preflight-only',
                 '--python', args.base_python, '--cuda-home', toolkit['root'], '--nvcc', toolkit['compiler'],
                 '--out', out], env, timeout=7500)
     state, report = read(out / 'batch-state.json'), read(out / 'report.json')

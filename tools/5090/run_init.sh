@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 # Compilation defaults to nproc; -j/--jobs overrides the frozen NVCC limit.
+# --execute detaches by default; --foreground waits. --place defaults to 61.
 set -euo pipefail
 rtx_repo=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/../.." && pwd)
 rtx_python=${RTX5090_PYTHON:-python3}

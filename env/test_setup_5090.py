@@ -240,6 +240,7 @@ class ExistingSoftware(unittest.TestCase):
             command=runner.commands[0]
             self.assertIn(str(setup.REPO/'tools/5090/init.py'),command['argv'])
             self.assertIn('--preflight-only',command['argv'])
+            self.assertIn('--foreground',command['argv'])
             self.assertNotIn('--megatron',command['argv'])
             self.assertEqual(command['env']['CUDA_VISIBLE_DEVICES'],'0,1,2,3,4,5,6,7')
 

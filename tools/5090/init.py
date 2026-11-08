@@ -5,6 +5,7 @@ from datetime import datetime
 import os
 from pathlib import Path
 import shutil
+import shlex
 import signal
 import subprocess
 import sys
@@ -26,7 +27,11 @@ def arguments(argv=None):
     parser.add_argument('--blocks', type=int, default=8,
                         help='Four-arm blocks per trial; 1 is a short test, multiples of 8 are balanced')
     parser.add_argument('--execute', action='store_true', help='Without this flag, only print the plan')
-    parser.add_argument('--out', type=Path)
+    parser.add_argument('--foreground', action='store_true', help='Wait in the current terminal; --execute defaults to background')
+    parser.add_argument('--place', type=int, choices=(60, 61), default=61,
+                        help='Output under sibling Data-5090/SL3060 or SL3061 (default: 61)')
+    parser.add_argument('--out', type=Path, help='Explicit fresh output directory; overrides --place routing')
+    parser.add_argument('--background-token', help=argparse.SUPPRESS)
     parser.add_argument('--python', default=sys.executable)
     parser.add_argument('--nvcc', help='CUDA compiler; defaults to --cuda-home/bin/nvcc or target discovery')
     parser.add_argument('-j', '--jobs', type=int,
@@ -54,6 +59,8 @@ def arguments(argv=None):
     parser.add_argument('--worker-timeout', type=int, default=7200)
     parser.add_argument('--report', action='store_true', help='Read-only audit of a completed --out directory')
     args = parser.parse_args(argv)
+    p.require(args.background_token is None or (args.execute and args.foreground and args.out is not None),
+              'A reserved background run requires --execute --foreground and --out')
     # Resolve before launch() sets worker OMP_NUM_THREADS=1. Every rank must
     # receive this same frozen value instead of rediscovering a smaller count.
     args.jobs = resolve_jobs(args.jobs)
@@ -83,7 +90,7 @@ def arguments(argv=None):
     args.model = model
     if args.out is None:
         timestamp = datetime.now(ZoneInfo('Asia/Shanghai')).strftime('%Y%m%d-%H%M%S-%f')
-        args.out = REPO / 'logs/5090' / f'init-four-arm-{timestamp}'
+        args.out = REPO.parent / 'Data-5090' / f'SL30{args.place}' / f'init-four-arm-{timestamp}'
     args.out = args.out.expanduser().resolve()
     args.scope = 'preflight' if args.preflight_only else 'operator' if args.operator_only else 'train'
     p.require(args.report or args.scope != 'train' or args.warmup_steps >= 1,
@@ -117,7 +124,7 @@ def runtime_environment(args):
 
 
 def plan_for(args, manifest=None, run_id=None):
-    config = dict(protocol=p.PROTOCOL, run_id=run_id or 'PREVIEW', world_size=args.world_size,
+    config = dict(protocol=p.PROTOCOL, run_id=run_id or 'PREVIEW', world_size=args.world_size, place=args.place,
         model=args.model, timing=dict(warmup_steps=args.warmup_steps, timed_steps=args.steps,
             operator_warmup=args.operator_warmup, operator_iterations=args.operator_iters),
         seed=1234, token_seed=4321, nvcc=args.nvcc,
@@ -179,21 +186,32 @@ def launch(command, directory, source_root, timeout, frozen_environment):
 
 
 def execute(args):
-    p.require(not args.out.exists(), 'Output directory already exists; use a fresh --out')
-    python = shutil.which(args.python)
-    p.require(python is not None, f'Python executable not found: {args.python}')
-    required = ('python/flux_5090/worker.py', 'python/flux_5090/runtime.py',
-                'python/flux_5090/native.py', 'src/gemm/native.cu', 'src/taco/codec.cu')
-    p.require(all((REPO / name).is_file() for name in required), 'Incomplete standalone RTX5090 source checkout')
-    reporting.validate_reference_sources(REPO)
-    files = source_files()
-    manifest = {str(file.relative_to(REPO)): p.sha(file) for file in files}
-    plan = plan_for(args, manifest=manifest, run_id=uuid.uuid4().hex)
-    args.out.mkdir(parents=True, exist_ok=False)
-    state = dict(protocol=p.PROTOCOL, run_id=plan['config']['run_id'], status='preparing',
-                 completed=False, scope=args.scope, finished_jobs=0)
+    if args.background_token is not None:
+        receipt = p.read(args.out / 'launcher.json')
+        p.require(receipt.get('token') == args.background_token and receipt.get('output') == str(args.out),
+                  'Background output reservation does not belong to this controller')
+        allowed = {'launcher.json', 'launcher.json.tmp', 'controller.log', 'controller.pid'}
+        p.require({path.name for path in args.out.iterdir()} <= allowed,
+                  'Reserved background directory already contains an experiment; refusing to overwrite')
+        with (args.out / 'controller.claim').open('x') as claim:
+            claim.write(str(os.getpid()) + '\n')
+    else:
+        p.require(not args.out.exists(), 'Output directory already exists; use a fresh --out')
+        args.out.mkdir(parents=True, exist_ok=False)
+    state = dict(protocol=p.PROTOCOL, run_id=uuid.uuid4().hex, status='preparing',
+                 completed=False, scope=args.scope, finished_jobs=0, place=args.place,
+                 controller_pid=os.getpid())
     p.write(args.out / 'batch-state.json', state)
     try:
+        python = shutil.which(args.python)
+        p.require(python is not None, f'Python executable not found: {args.python}')
+        required = ('python/flux_5090/worker.py', 'python/flux_5090/runtime.py',
+                    'python/flux_5090/native.py', 'src/gemm/native.cu', 'src/taco/codec.cu')
+        p.require(all((REPO / name).is_file() for name in required), 'Incomplete standalone RTX5090 source checkout')
+        reporting.validate_reference_sources(REPO)
+        files = source_files()
+        manifest = {str(file.relative_to(REPO)): p.sha(file) for file in files}
+        plan = plan_for(args, manifest=manifest, run_id=state['run_id'])
         source_root = args.out / 'sources'
         for file in files:
             dest = source_root / file.relative_to(REPO)
@@ -273,11 +291,62 @@ def execute(args):
         raise
 
 
+def start_background(args, argv):
+    """Detach only our controller; the child retains normal worker cleanup/status."""
+    p.require(not args.out.exists(), 'Output directory already exists; use a fresh --out')
+    python = shutil.which(args.python)
+    p.require(python is not None, f'Python executable not found: {args.python}')
+    token = uuid.uuid4().hex
+    # Appended normalized options preserve one output path, interpreter and CPU
+    # budget even if the caller used relative paths or a different working dir.
+    command = [sys.executable, '-u', str(Path(__file__).resolve()), *argv,
+               '--foreground', '--out', str(args.out), '--jobs', str(args.jobs),
+               '--python', str(Path(python).absolute()), '--background-token', token]
+    if args.cuda_home is not None:
+        command += ['--cuda-home', str(args.cuda_home)]
+    if args.nvcc:
+        nvcc = str(Path(args.nvcc).expanduser().absolute()) if '/' in args.nvcc else args.nvcc
+        command += ['--nvcc', nvcc]
+    args.out.mkdir(parents=True, exist_ok=False)
+    log = args.out / 'controller.log'
+    receipt = dict(token=token, output=str(args.out), place=args.place, command=command,
+                   status='launching', launcher_pid=os.getpid())
+    p.write(args.out / 'launcher.json', receipt)
+    env = dict(os.environ, PYTHONDONTWRITEBYTECODE='1', PYTHONUNBUFFERED='1')
+    process = None
+    try:
+        with log.open('x') as stream:
+            process = subprocess.Popen(command, cwd=REPO, env=env, stdin=subprocess.DEVNULL,
+                                       stdout=stream, stderr=subprocess.STDOUT,
+                                       start_new_session=True, close_fds=True)
+        receipt.update(status='launched', controller_pid=process.pid)
+        (args.out / 'controller.pid').write_text(str(process.pid) + '\n')
+        p.write(args.out / 'launcher.json', receipt)
+    except BaseException as exc:
+        if process is not None:
+            stop_process(process)
+        receipt.update(status='launch_failed', error=f'{type(exc).__name__}: {exc}')
+        p.write(args.out / 'launcher.json', receipt)
+        p.write(args.out / 'batch-state.json', dict(protocol=p.PROTOCOL, completed=False,
+            status='launch_failed', error=receipt['error'], scope=args.scope, place=args.place))
+        raise
+    print(f'Background controller started: PID {process.pid}\nOutput: {args.out}\nLog: {log}', flush=True)
+    print('Follow: tail -f ' + shlex.quote(str(log)), flush=True)
+    print(f'State: {args.out / "batch-state.json"}\nStop: kill -TERM {process.pid}', flush=True)
+    return process.pid
+
+
 def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = arguments(argv)
     if args.report:
         print(reporting.markdown(reporting.replay(args.out)))
     elif args.execute:
+        if not args.foreground:
+            start_background(args, argv)
+            return
+        if args.background_token is not None:
+            signal.signal(signal.SIGHUP, signal.SIG_IGN)
         # A scheduler/user SIGTERM should also clean up the worker's dedicated
         # process group, rather than orphaning torchrun after the controller exits.
         def terminate(_number, _frame):
@@ -290,7 +359,8 @@ def main(argv=None):
     else:
         import json
         print(json.dumps(dict(preview=True, writes_files=False, uses_gpu=False,
-            output=str(args.out), **plan_for(args)), ensure_ascii=False, indent=2))
+            output=str(args.out), execution_mode='foreground' if args.foreground else 'background',
+            **plan_for(args)), ensure_ascii=False, indent=2))
 
 
 if __name__ == '__main__':

@@ -8,7 +8,7 @@
 bash tools/5090/run_init.sh --trials 1 --blocks 1 --execute
 ```
 
-不加 `--execute` 只输出实验计划，不查询 GPU、不编译、不写结果。默认 TP8，先预检和独立校准，再完成四组算子检查，最后测试 GPT 6.7B 完整训练步。单块是功能短测，不计算置信区间。
+不加 `--execute` 只输出实验计划，不查询 GPU、不编译、不写结果。加 `--execute` 默认后台启动，立即返回 PID、结果目录和日志查看命令；`--foreground` 改为当前终端等待。默认 `--place 61`，新批次保存在仓库同级 `Data-5090/SL3061/` 下。默认 TP8，先预检和独立校准，再完成四组算子检查，最后测试 GPT 6.7B 完整训练步。单块是功能短测，不计算置信区间。
 
 ## 1. 四组的严格含义
 
@@ -133,6 +133,13 @@ bash tools/5090/run_init.sh --trials 1 --blocks 1 --small-model \
 # 所请求的 GPT6.7B、TP8 完整短测。
 bash tools/5090/run_init.sh --trials 1 --blocks 1 --execute
 
+# 后台运行并按服务器位置保存；省略 --place 等同 --place 61。
+bash tools/5090/run_init.sh --place 61 --trials 1 --blocks 1 --execute
+bash tools/5090/run_init.sh --place 60 --trials 1 --blocks 1 --execute
+
+# 在当前终端等待预检，便于直接查看环境错误。
+bash tools/5090/run_init.sh --place 61 --preflight-only --execute --foreground
+
 # 显式写出默认编译并行度；也可用 -j 8 等限制编译线程。
 bash tools/5090/run_init.sh -j "$(nproc)" --trials 1 --blocks 1 --execute
 
@@ -149,6 +156,10 @@ bash tools/5090/run_init.sh --report --out /path/to/finished-run
 
 预检只证明其实际执行的能力项。完整原生 GEMM 的数值/重复输入检查在校准和 operator 阶段进行。`--profile` 的人工 lane 延迟与正常 trace 使用独立调用，排除在校准、正常算子计时和训练计时之外；普通短测也执行到达优先的独立人工错峰诊断，但不据此宣称正常负载加速。
 
+后台控制进程使用独立会话、关闭终端输入，并把输出写入 `controller.log`，无需另加 `nohup` 或 `&`。启动信息只表示进程已创建，实验是否成功以 `batch-state.json` 和最终报告为准。GPU 检查、编译或 worker 失败都会保留日志与失败状态。运行中可向打印的控制进程 PID 发送 `SIGTERM`，控制器会清理自己启动的 worker 进程组。
+
+`--place` 只选择保存位置，不改变 GPU 可见性、训练配置或实际主机身份记录。显式 `--out /绝对路径/新批次` 优先于 `--place`；已有批次不会覆盖。`env/setup_5090.sh --gpu-check` 内部显式使用 `--foreground` 等待预检，其检查日志仍使用 setup 显式指定的目录。
+
 ## 4. 完整训练与报告口径
 
 默认 32 层、hidden=4096、FFN=16384、32 heads、sequence=2048、micro_batch=1、梯度累积=4、vocab=33792、TP8/SP，BF16 模型与 FP32 AdamW master/state。embedding 与输出头共享，实际逻辑参数数为 **6,590,963,712**，每 rank **831,905,792**。模型包含 attention、MLP、残差、LayerNorm、词表并行交叉熵、反向传播、复制参数梯度归约、全局 norm、裁剪与权重更新；不能将其称为原 Megatron 完全相同的训练图。
@@ -157,10 +168,23 @@ bash tools/5090/run_init.sh --report --out /path/to/finished-run
 
 一块执行 **10 个 torchrun worker 窗口**：1 预检 + 1 校准 + 4 算子 + 4 训练；共 200 个正式 optimizer step，各训练窗口独立初始化。八块执行 66 个窗口，其中 32 个训练窗口、1600 个正式 optimizer step。单次算子窗口默认 warmup=100、iterations=200，每个窗口测试两个投影角色。
 
-默认输出在 `logs/5090/init-four-arm-<时间>/`：
+默认路径相对于仓库的位置如下；当仓库为 `/workspace/TempName-5090` 时，结果位于 `/workspace/Data-5090/`：
+
+```text
+/workspace/
+├── Data-5090/
+│   ├── SL3060/init-four-arm-<时间>/    --place 60
+│   └── SL3061/init-four-arm-<时间>/    --place 61，默认
+├── TempName-5090/
+├── TempName-New/
+└── Megatron-LM/
+```
+
+每批结果、编译产物、源码快照和 profile 均放在同一批次目录：
 
 ```text
 plan.json / source-manifest.json / sources/    冻结计划和实际运行源码
+controller.log / controller.pid / launcher.json  后台总日志、PID与启动记录
 build/gemm/ / build/codec/                    本批两份原生库及编译记录
 arrival-plan.json                            唯一冻结到达计划
 results/<窗口>/config.json / command.json    实际worker配置和命令
@@ -168,6 +192,8 @@ results/<窗口>/process.log / rank*.json      全rank原始证据与异常
 completed-jobs.json / batch-state.json        完成账本及状态
 report.json / report.md                      完整复核后生成的报告
 ```
+
+启动后直接复制终端打印的 `tail -f .../controller.log` 查看总日志。细节在 `results/<窗口>/process.log`；`batch-state.json` 记录正在执行的窗口以及 `completed` / `failed` / `interrupted` 等状态。前台模式的控制器输出留在当前终端，逐窗口日志仍正常保存。
 
 报告使用每窗口 **max-rank 墙钟时间**，分别给算子 μs、训练 ms/step、tokens/s、loss、grad norm、显存以及相邻组和总收益。性能下降为正表示更快，负值保留。八块平衡周期后才给按完整块 bootstrap 的区间，不把八个 rank 或窗口内 step 当独立样本；不同 trial 分开报告。重复、缺 rank、缺窗口、轨迹差异、编译输入/库/环境漂移都不能被“completed”标签掩盖。
 

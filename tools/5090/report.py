@@ -374,6 +374,7 @@ def replay(root):
         for other in p.FULL_TACO_ARMS[1:]:
             p.compare_taco_trajectories(group['flux_taco'], group[other])
     report = dict(protocol=p.PROTOCOL, run_id=config['run_id'], completed=True,
+        place=config.get('place'),
         build_jobs=config['build_jobs'],
         completed_scope=plan['scope'], hardware_target='RTX5090, single-node',
         standard_tp8_workload=(config['world_size'] == 8 and config['model'] == p.MODEL),
