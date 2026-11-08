@@ -1,0 +1,5 @@
+{
+  "source": "TempName-New/tools/5090/phase6/op3_codec.cu",
+  "sha256": "e68bceecd4b06520ed347153a55eb973dc42f77683c3142edf3b3816f6f3756b",
+  "purpose": "Warp-owned H128 and CUDA native FP8 conversion reference only; not compiled. New adapter changes packet layout, shape validation and reduction source order."
+}

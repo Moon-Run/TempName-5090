@@ -4,3 +4,20 @@
 *.ptx
 *.cubin
 *.fatbin
+
+# Local builds and experiment artifacts
+__pycache__/
+*.py[cod]
+*.so
+*.o
+build/
+dist/
+*.egg-info/
+logs/
+outputs/
+.pytest_cache/
+.venv/
+
+# Recreated from the tracked third_party/cutlass.lock.json by env/setup_5090.sh
+/third_party/cutlass/
+/third_party/.cutlass-setup-*/
