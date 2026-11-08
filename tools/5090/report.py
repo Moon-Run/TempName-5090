@@ -83,6 +83,12 @@ def validate_artifacts(root, directory, rows, config):
     checked_codec, checked_gemm = set(), set()
     for row in rows:
         build = row['codec_build']
+        for label, flags in (('codec', build['identity'].get('flags', [])),
+                             ('GEMM', row['native_build'].get('flags', []))):
+            for option in ('--threads', '--split-compile'):
+                p.require(flags.count(option) == 1 and flags.index(option) + 1 < len(flags)
+                          and flags[flags.index(option) + 1] == str(config['build_jobs']),
+                          f'{label} compile parallelism differs from frozen build_jobs')
         p.require(build['identity']['source_sha256'] == codec_source_sha,
                   'Native codec source differs from frozen source')
         key = hashlib.sha256(json.dumps(build['identity'], sort_keys=True).encode()).hexdigest()[:24]
@@ -111,7 +117,7 @@ def validate_artifacts(root, directory, rows, config):
         gemm_manifest, gemm_library = gemm_dir / 'manifest.json', gemm_dir / 'libflux_5090_gemm.so'
         if gemm['cache_key'] not in checked_gemm:
             expected_inputs = {name: source_manifest[name] for name in
-                               ('src/gemm/native.cu', 'python/flux_5090/native.py')}
+                               ('src/gemm/native.cu', 'python/flux_5090/native.py', 'python/flux_5090/build_options.py')}
             for upstream in ('flux', 'cutlass'):
                 relative = ('third_party/cutlass.lock.json' if upstream == 'cutlass'
                             else f'third_party/{upstream}/manifest.json')
@@ -368,6 +374,7 @@ def replay(root):
         for other in p.FULL_TACO_ARMS[1:]:
             p.compare_taco_trajectories(group['flux_taco'], group[other])
     report = dict(protocol=p.PROTOCOL, run_id=config['run_id'], completed=True,
+        build_jobs=config['build_jobs'],
         completed_scope=plan['scope'], hardware_target='RTX5090, single-node',
         standard_tp8_workload=(config['world_size'] == 8 and config['model'] == p.MODEL),
         implementation='Flux GemmV2 DP with modified CTA scheduling/publication and NCCL block transport',

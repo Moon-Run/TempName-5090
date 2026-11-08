@@ -391,8 +391,9 @@ def main():
                                    model['hidden'], width // world, world, model['chunk_rows'])
         row['environment_identity'] = identity(rank)
         from flux_5090.native import NativeGemm
-        native = NativeGemm(nvcc=config.get('nvcc'), build_dir=Path(config['build_dir'])/'gemm')
-        codec = NativeCodec(nvcc=config.get('nvcc'), build_dir=Path(config['build_dir'])/'codec', verbose=rank==0)
+        native = NativeGemm(nvcc=config.get('nvcc'), build_dir=Path(config['build_dir'])/'gemm', jobs=config['build_jobs'])
+        codec = NativeCodec(nvcc=config.get('nvcc'), build_dir=Path(config['build_dir'])/'codec',
+                            verbose=rank==0, jobs=config['build_jobs'])
         codec.gemm = native
         row['native_build'], row['codec_build'] = native.manifest, codec.manifest
         if args.stage == 'preflight':

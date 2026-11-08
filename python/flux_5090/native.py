@@ -16,6 +16,8 @@ import shutil
 import subprocess
 import tempfile
 
+from .build_options import nvcc_parallel_flags
+
 ROOT = Path(__file__).resolve().parents[2]
 PROTOCOL = "flux-5090-native-v1"
 BACKEND = "flux-cutlass-dp-ready-nccl-v1"
@@ -128,19 +130,20 @@ def source_inputs(root=ROOT):
         digest = sha256(manifest_file)
         inputs[str(manifest_file.relative_to(root))] = digest
         sources[name] = {"revision": manifest["revision"], "manifest_sha256": digest}
-    for relative in ("src/gemm/native.cu", "python/flux_5090/native.py"):
+    for relative in ("src/gemm/native.cu", "python/flux_5090/native.py", "python/flux_5090/build_options.py"):
         inputs[relative] = sha256(root / relative)
     return dict(sorted(inputs.items())), sources
 
 
-def build_native(nvcc=None, build_dir=None):
+def build_native(nvcc=None, build_dir=None, jobs=None):
     """Compile once under a file lock and atomically publish the complete cache."""
     for key in ("NVCC_PREPEND_FLAGS", "NVCC_APPEND_FLAGS"):
         if os.environ.get(key):
             raise RuntimeError(f"Unset {key}; compiler flag injection is unsupported")
     inputs, sources = source_inputs()
     compiler = _compiler(nvcc)
-    identity = {"compiler": compiler, "flags": FLAGS, "inputs": inputs}
+    flags = [*FLAGS, *nvcc_parallel_flags(jobs)]
+    identity = {"compiler": compiler, "flags": flags, "inputs": inputs}
     key = hashlib.sha256(canonical(identity).encode()).hexdigest()
     cache = Path(build_dir or os.environ.get("FLUX_5090_BUILD_DIR", ROOT / "build/native")).resolve()
     cache.mkdir(parents=True, exist_ok=True)
@@ -150,7 +153,7 @@ def build_native(nvcc=None, build_dir=None):
         if target.exists():
             manifest = json.loads((target / "manifest.json").read_text())
             if (manifest["cache_key"] != key or manifest["inputs"] != inputs
-                    or manifest["compiler"] != compiler or manifest["flags"] != FLAGS
+                    or manifest["compiler"] != compiler or manifest["flags"] != flags
                     or sha256(target / LIBRARY) != manifest["library_sha256"]):
                 raise RuntimeError(f"Native build cache identity mismatch: {target}")
             manifest["library_path"] = str(target / LIBRARY)
@@ -160,7 +163,7 @@ def build_native(nvcc=None, build_dir=None):
             include = [ROOT / "third_party/flux/include", ROOT / "third_party/flux/src",
                        ROOT / "third_party/cutlass/include", ROOT / "third_party/cutlass/tools/util/include"]
             cuda_lib = Path(compiler["path"]).parent.parent / "lib64"
-            command = [compiler["path"], *FLAGS, *[f"-I{x}" for x in include],
+            command = [compiler["path"], *flags, *[f"-I{x}" for x in include],
                        str(ROOT / "src/gemm/native.cu"), "-ldl",
                        f"-Xlinker=-rpath,{cuda_lib}", "-o", str(temporary / LIBRARY)]
             with (temporary / "compile.log").open("w") as output:
@@ -171,7 +174,7 @@ def build_native(nvcc=None, build_dir=None):
                 raise RuntimeError(f"Native SM120 compilation failed; see {temporary / 'compile.log'}")
             manifest = dict(protocol=PROTOCOL, backend=BACKEND, cache_key=key,
                             library_path=str(target / LIBRARY), library_sha256=sha256(temporary / LIBRARY),
-                            compiler=compiler, flags=list(FLAGS), inputs=inputs, sources=sources,
+                            compiler=compiler, flags=flags, inputs=inputs, sources=sources,
                             uses_flux_gemm_templates=True, original_flux_kernel_unchanged=False,
                             original_cuda_flux_reduce_scatter=False, cta_level_swizzle=True,
                             native_gemm_family="FluxGemmV2-DP", producer_launches_per_call=1,
@@ -190,8 +193,8 @@ def build_native(nvcc=None, build_dir=None):
 
 
 class NativeGemm:
-    def __init__(self, nvcc=None, build_dir=None):
-        self.manifest = build_native(nvcc, build_dir)
+    def __init__(self, nvcc=None, build_dir=None, jobs=None):
+        self.manifest = build_native(nvcc, build_dir, jobs)
         self.library_path = Path(self.manifest["library_path"])
         self._lib = ctypes.CDLL(str(self.library_path))
         integer, pointer = ctypes.c_int, ctypes.c_void_p

@@ -38,6 +38,27 @@ class ProtocolTests(unittest.TestCase):
         self.assertAlmostEqual(value['percent'], 10)
         self.assertFalse(p.balanced(7))
 
+    def test_four_blocks_keep_estimate_but_have_no_ci_or_pair_order_balance(self):
+        value = reporting.pair_statistics([9.] * 4, [10.] * 4, p.balanced(4))
+        self.assertAlmostEqual(value['percent'], 10.)
+        self.assertIsNone(value['ci95'])
+        self.assertEqual(value['paired_blocks'], 4)
+        blocks = p.orders(1, 4)
+        self.assertEqual(sum(row['arms'].index(p.ARMS[0]) < row['arms'].index(p.ARMS[1])
+                             for row in blocks), 3)
+
+    def test_build_jobs_are_resolved_before_workers_and_can_be_overridden(self):
+        with mock.patch.object(controller, 'resolve_jobs', return_value=24) as resolve:
+            args = controller.arguments(['--blocks', '1'])
+            self.assertEqual(controller.plan_for(args)['config']['build_jobs'], 24)
+            resolve.assert_called_once_with(None)
+        for option in ('-j', '--jobs'):
+            args = controller.arguments([option, '3'])
+            self.assertEqual(controller.plan_for(args)['config']['build_jobs'], 3)
+        for count in ('0', '-1'):
+            with self.assertRaises(ValueError):
+                controller.arguments(['-j', count])
+
     def test_paired_statistics_preserve_regression(self):
         value = reporting.pair_statistics([11.] * 8, [10.] * 8, balanced=True, bootstrap=100)
         self.assertAlmostEqual(value['percent'], -10)
@@ -148,7 +169,7 @@ class ProtocolTests(unittest.TestCase):
 
 class ReportTests(unittest.TestCase):
     def fixture(self, root, profile=False):
-        arguments = ['--blocks', '1', '--steps', '2', '--operator-iters', '3',
+        arguments = ['--blocks', '1', '--steps', '2', '--operator-iters', '3', '--jobs', '2',
                      '--world-size', '2', '--small-model', '--out', str(root)]
         if profile:
             arguments.append('--profile')
@@ -157,7 +178,7 @@ class ReportTests(unittest.TestCase):
         source.parent.mkdir(parents=True)
         source.write_text('# Test fixture only\n')
         manifest = {'src/taco/codec.cu': p.sha(source)}
-        for relative in ('src/gemm/native.cu', 'python/flux_5090/native.py'):
+        for relative in ('src/gemm/native.cu', 'python/flux_5090/native.py', 'python/flux_5090/build_options.py'):
             native_source = root / 'sources' / relative
             native_source.parent.mkdir(parents=True, exist_ok=True)
             native_source.write_text('// Synthetic compiled-input fixture, not GPU execution\n')
@@ -185,7 +206,8 @@ class ReportTests(unittest.TestCase):
         plan = controller.plan_for(args, manifest, run_id='fixture-run')
         p.write(root / 'source-manifest.json', manifest)
         p.write(root / 'plan.json', plan)
-        build_identity = dict(source_sha256=p.sha(source), abi='fixture')
+        parallel_flags = ['--threads', str(args.jobs), '--split-compile', str(args.jobs)]
+        build_identity = dict(source_sha256=p.sha(source), abi='fixture', flags=parallel_flags)
         build_key = hashlib.sha256(json.dumps(build_identity, sort_keys=True).encode()).hexdigest()[:24]
         library = root / 'build/codec' / build_key / 'libflux_5090_taco.so'
         library.parent.mkdir(parents=True)
@@ -193,13 +215,14 @@ class ReportTests(unittest.TestCase):
         codec_build = dict(identity=build_identity, library_sha256=p.sha(library))
         p.write(library.parent / 'manifest.json', codec_build)
         gemm_inputs = {key: value for key, value in manifest.items() if key in
-                       ('src/gemm/native.cu', 'python/flux_5090/native.py', 'third_party/cutlass.lock.json')
+                       ('src/gemm/native.cu', 'python/flux_5090/native.py', 'python/flux_5090/build_options.py',
+                        'third_party/cutlass.lock.json')
                        or key.startswith(('third_party/flux/', 'third_party/cutlass/'))}
         gemm_identity = dict(compiler=dict(path='/synthetic/nvcc', version='synthetic fixture',
             sha256=hashlib.sha256(b'SYNTHETIC COMPILER FIXTURE').hexdigest(),
             environment={key: None for key in ('CUDA_HOME', 'CUDA_PATH', 'NVCC_CCBIN',
                                                'CPATH', 'CPLUS_INCLUDE_PATH', 'LIBRARY_PATH')}),
-                             flags=['-arch=sm_120'], inputs=gemm_inputs)
+                             flags=['-arch=sm_120', *parallel_flags], inputs=gemm_inputs)
         gemm_key = p.digest(gemm_identity)
         gemm_library = root / 'build/gemm' / gemm_key / 'libflux_5090_gemm.so'
         gemm_library.parent.mkdir(parents=True)
@@ -562,6 +585,23 @@ class ReportTests(unittest.TestCase):
             p.write(root / 'completed-jobs.json', completed)
             with self.assertRaisesRegex(ValueError, 'input set/hash differs'):
                 reporting.replay(root)
+
+    def test_report_rejects_build_parallelism_different_from_plan(self):
+        for field in ('native_build', 'codec_build'):
+            with self.subTest(field=field), tempfile.TemporaryDirectory() as tmp:
+                root = Path(tmp)
+                self.fixture(root)
+                file = root / 'results/preflight/rank0.json'
+                row = p.read(file)
+                build = row[field] if field == 'native_build' else row[field]['identity']
+                flags = build['flags']
+                flags[flags.index('--split-compile') + 1] = '99'
+                p.write(file, row)
+                completed = p.read(root / 'completed-jobs.json')
+                completed[0]['rank_sha256']['rank0.json'] = p.sha(file)
+                p.write(root / 'completed-jobs.json', completed)
+                with self.assertRaisesRegex(ValueError, 'compile parallelism'):
+                    reporting.replay(root)
 
     def test_missing_cutlass_lock_cannot_hide_behind_new_cache_hash(self):
         with tempfile.TemporaryDirectory() as tmp:

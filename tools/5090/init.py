@@ -16,6 +16,8 @@ import protocol as p
 import report as reporting
 
 REPO = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(REPO / 'python'))
+from flux_5090.build_options import resolve_jobs
 
 
 def arguments(argv=None):
@@ -27,6 +29,8 @@ def arguments(argv=None):
     parser.add_argument('--out', type=Path)
     parser.add_argument('--python', default=sys.executable)
     parser.add_argument('--nvcc', help='CUDA compiler; defaults to --cuda-home/bin/nvcc or target discovery')
+    parser.add_argument('-j', '--jobs', type=int,
+                        help='Build parallelism (default: nproc); NVCC threads and split-compile limit')
     parser.add_argument('--cuda-home', type=Path, default=os.environ.get('CUDA_HOME'))
     parser.add_argument('--connections', type=int, default=8,
                         help='CUDA work queues, 8..32; concurrent pipeline comparison rejects 1')
@@ -50,6 +54,9 @@ def arguments(argv=None):
     parser.add_argument('--worker-timeout', type=int, default=7200)
     parser.add_argument('--report', action='store_true', help='Read-only audit of a completed --out directory')
     args = parser.parse_args(argv)
+    # Resolve before launch() sets worker OMP_NUM_THREADS=1. Every rank must
+    # receive this same frozen value instead of rediscovering a smaller count.
+    args.jobs = resolve_jobs(args.jobs)
     p.orders(args.trials, args.blocks)
     p.require(args.warmup_steps >= 0 and args.operator_warmup >= 0,
               'Warmup counts must be nonnegative')
@@ -115,7 +122,7 @@ def plan_for(args, manifest=None, run_id=None):
             operator_warmup=args.operator_warmup, operator_iterations=args.operator_iters),
         seed=1234, token_seed=4321, nvcc=args.nvcc,
         cuda_home=str(args.cuda_home) if args.cuda_home is not None else None,
-        connections=args.connections, build_dir=str(args.out / 'build'),
+        connections=args.connections, build_dir=str(args.out / 'build'), build_jobs=args.jobs,
         profile=args.profile, source_manifest_sha256=p.digest(manifest) if manifest is not None else 'PREVIEW',
         backend=p.BACKEND, runtime_environment=runtime_environment(args),
         calibration=args.calibration, execution_plan=None, execution_plan_sha256=None)

@@ -86,9 +86,9 @@ class NativeSourceLockTests(unittest.TestCase):
             (folder / "manifest.json").write_bytes(manifest)
             if name == "cutlass":
                 (root / "third_party/cutlass.lock.json").write_bytes(manifest)
-        for name in ("src/gemm/native.cu", "python/flux_5090/native.py"):
+        for name in ("src/gemm/native.cu", "python/flux_5090/native.py", "python/flux_5090/build_options.py"):
             file = root / name
-            file.parent.mkdir(parents=True)
+            file.parent.mkdir(parents=True, exist_ok=True)
             file.write_text("fixture")
 
     def test_missing_checkout_has_setup_instruction(self):

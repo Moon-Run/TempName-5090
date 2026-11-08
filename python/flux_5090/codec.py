@@ -18,6 +18,8 @@ import subprocess
 import sysconfig
 import uuid
 
+from .build_options import nvcc_parallel_flags
+
 ABI_VERSION = 1
 GROUP_SIZE = 128
 GROUP_BYTES = 136
@@ -56,7 +58,7 @@ def _compiler(nvcc=None) -> Path:
     raise RuntimeError("CUDA nvcc >=12.8 not found; set NVCC=/path/to/cuda/bin/nvcc")
 
 
-def _build(nvcc, build_dir: Path, verbose: bool):
+def _build(nvcc, build_dir: Path, verbose: bool, jobs=None):
     if not SOURCE.is_file():
         raise RuntimeError(f"CUDA TACO source is missing: {SOURCE}; install the package with its share/flux-5090 source data")
     compiler = _compiler(nvcc)
@@ -72,6 +74,7 @@ def _build(nvcc, build_dir: Path, verbose: bool):
         if os.environ.get(key):
             raise RuntimeError(f"Unset {key}; compiler flag injection is unsupported")
     flags = ["-arch=sm_120", "-O3", "--fmad=false", "-std=c++17", "--shared", "-Xcompiler=-fPIC"]
+    flags += nvcc_parallel_flags(jobs)
     identity = dict(abi=ABI_VERSION, source_sha256=_sha(SOURCE), compiler=str(compiler),
                     compiler_sha256=_sha(compiler), compiler_version=version_text, flags=flags,
                     compiler_environment={key: os.environ.get(key) for key in
@@ -122,8 +125,8 @@ class NativeCodec:
     boundaries to catch asynchronous device faults.
     """
 
-    def __init__(self, nvcc=None, build_dir: Path = DEFAULT_BUILD_DIR, verbose=False):
-        self.library_path, self.manifest = _build(nvcc, Path(build_dir), bool(verbose))
+    def __init__(self, nvcc=None, build_dir: Path = DEFAULT_BUILD_DIR, verbose=False, jobs=None):
+        self.library_path, self.manifest = _build(nvcc, Path(build_dir), bool(verbose), jobs)
         self.lib = ctypes.CDLL(str(self.library_path))
         self.lib.flux_5090_codec_abi.argtypes = []
         self.lib.flux_5090_codec_abi.restype = ctypes.c_int

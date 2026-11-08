@@ -16,6 +16,8 @@ bash tools/5090/run_init.sh --trials 1 --blocks 1 --execute
 
 需要 CUDA PyTorch、CUDA 12.8+ nvcc 和默认八张 RTX 5090。CUTLASS 头文件目录不入 Git，配置脚本按仓库中的 `third_party/cutlass.lock.json` 恢复；实验首次执行时编译已校验的冻结源码。单块用于短测；正式平衡实验使用 `--blocks 8`，结果写入 `logs/5090/`。
 
+默认编译并行度为 `nproc`，可用 `-j N` / `--jobs N` 覆盖；原生 NVCC 编译启用 threads 和 split-compile。`--blocks 4` 会报告耗时及配对加速率，但按本协议不计算置信区间。
+
 环境复用、离线源码和配置参数见 [环境说明](env/README_5090.md)。实现、其他测试命令、报告口径和待验证边界见 [设计说明](docs/design-5090/init.md)。当前已完成 CPU 检查和 SM120 编译，多卡正确性与性能需要在目标服务器测试。这里的 Flux 为修改了排程/发布及传输的派生基线，非未修改的上游 GemmRS。
 
 第三方来源与许可见 [NOTICE](NOTICE) 和 `third_party/`。

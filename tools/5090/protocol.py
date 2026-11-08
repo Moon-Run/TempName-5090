@@ -120,6 +120,7 @@ def validate_calibration_options(options):
 
 
 def validate_runtime_environment(config):
+    require(positive_int(config.get('build_jobs')), 'Positive frozen build_jobs required')
     require(type(config.get('connections')) is int and 8 <= config['connections'] <= 32,
             'Frozen CUDA connections must be in [8,32]')
     environment = config.get('runtime_environment', {})

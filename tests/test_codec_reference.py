@@ -177,8 +177,11 @@ extern "C" float decode_host(unsigned char x) {
 
     def test_build_abi_cache_and_reject_invalid_arguments_without_launch(self):
         with tempfile.TemporaryDirectory(prefix="5090-codec-compile-") as folder:
-            native = NativeCodec(os.environ["FLUX_5090_TEST_NVCC"], Path(folder))
+            native = NativeCodec(os.environ["FLUX_5090_TEST_NVCC"], Path(folder), jobs=2)
             library = native.library_path
+            flags = native.manifest['identity']['flags']
+            self.assertEqual(flags[flags.index('--threads') + 1], '2')
+            self.assertEqual(flags[flags.index('--split-compile') + 1], '2')
             self.assertEqual(native.lib.flux_5090_codec_abi(), 1)
             # Native argument rejection occurs before any GPU operation. These
             # checks exercise the loaded real CUDA shared library on a CPU host.
@@ -189,7 +192,7 @@ extern "C" float decode_host(unsigned char x) {
             self.assertNotEqual(native.lib.flux_5090_diagnostic_delay(0, None), 0)
             self.assertNotEqual(native.lib.flux_5090_diagnostic_delay(100000001, None), 0)
             before = library.stat().st_mtime_ns
-            cached = NativeCodec(os.environ["FLUX_5090_TEST_NVCC"], Path(folder))
+            cached = NativeCodec(os.environ["FLUX_5090_TEST_NVCC"], Path(folder), jobs=2)
             self.assertEqual(cached.library_path, library)
             self.assertEqual(library.stat().st_mtime_ns, before)
             self.assertEqual(cached.manifest, native.manifest)

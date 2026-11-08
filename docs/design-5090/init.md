@@ -102,6 +102,8 @@ source env/activate_5090.sh
 
 无需访问相邻 `TempName-New` / `flux` / `COCCL_TACO` 才能编译。实验首次执行在本批次 `build/` 下编译两份库，按源码、编译器和参数身份缓存并加锁。**实验源码快照仍包含实际 CUTLASS 头文件和外部锁**，报告继续复核全部编译输入和库文件；Git 忽略头文件不降低实验复核要求。
 
+编译并行度默认采用入口进程执行 `nproc` 的结果，等价于显式传入 `-j "$(nproc)"`；也支持 `--jobs N`。该值在启动 worker 前冻结为 `build_jobs`，不会被每个训练进程的 `OMP_NUM_THREADS=1` 降为 1。两份原生库均使用 `nvcc --threads N --split-compile N`，并将参数写入编译缓存身份与报告校验。当前只编译一个 SM120 架构，单独的 `--threads` 不会并行化它；`--split-compile` 才允许设备优化阶段使用多个线程。这是可并行阶段的线程上限，不保证全部 CPU 全程满载，也不改变训练 rank 数。[NVCC 并行编译说明](https://docs.nvidia.com/cuda/cuda-compiler-driver-nvcc/index.html#split-compile-number-split-compile)
+
 默认固定：
 
 ```text
@@ -130,6 +132,9 @@ bash tools/5090/run_init.sh --trials 1 --blocks 1 --small-model \
 
 # 所请求的 GPT6.7B、TP8 完整短测。
 bash tools/5090/run_init.sh --trials 1 --blocks 1 --execute
+
+# 显式写出默认编译并行度；也可用 -j 8 等限制编译线程。
+bash tools/5090/run_init.sh -j "$(nproc)" --trials 1 --blocks 1 --execute
 
 # 完成四次轮转及其反序，共八块的平衡实验。
 bash tools/5090/run_init.sh --trials 1 --blocks 8 --execute
@@ -165,6 +170,8 @@ report.json / report.md                      完整复核后生成的报告
 ```
 
 报告使用每窗口 **max-rank 墙钟时间**，分别给算子 μs、训练 ms/step、tokens/s、loss、grad norm、显存以及相邻组和总收益。性能下降为正表示更快，负值保留。八块平衡周期后才给按完整块 bootstrap 的区间，不把八个 rank 或窗口内 step 当独立样本；不同 trial 分开报告。重复、缺 rank、缺窗口、轨迹差异、编译输入/库/环境漂移都不能被“completed”标签掩盖。
+
+`--blocks 4` 会计算四组的均值、中位数、吞吐和配对下降率，但**不计算 95% CI**。四次轮转平衡了组所在位置，尚未补齐反序以平衡组之间的先后关系。本协议在每个 trial 的 blocks 至少为 8 且为 8 的整数倍时才计算 CI；多个四块 trial 不合并成八块。四块共 34 个 worker 窗口，其中 16 个完整训练窗口、默认累计 800 个正式 optimizer step。
 
 Torch allocated/reserved 分开报告；块 scratch 已包含在 allocated 中，不重复累加。原生 GEMM 的 `cudaMalloc` workspace 则逐 rank 加到 allocated 再取最大。该值仍不包含 CUDA context 与 NCCL 内部占用，不是整卡总显存。目标卡能否容纳全模型以真实执行为准，发生 OOM 会保留失败窗口，不静默改模型。
 
